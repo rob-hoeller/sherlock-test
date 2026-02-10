@@ -1,0 +1,5 @@
+# Make you the owner of everything
+* @rob-hoeller
+
+# Belt-and-suspenders: explicitly protect the CODEOWNERS file itself
+/.github/CODEOWNERS @rob-hoeller
