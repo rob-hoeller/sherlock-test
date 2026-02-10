@@ -42,3 +42,13 @@ Thumbs.db
 
 # Vercel
 .vercel
+
+# Testing
+*.test.js
+test-results/
+coverage/
+
+# Temporary files
+*.tmp
+*.bak
+.cache/
