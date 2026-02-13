@@ -2,9 +2,11 @@ const express = require('express');
 const fs = require('fs').promises;
 const path = require('path');
 const http = require('http');
+const MetricsDB = require('./metrics-db');
 
 const app = express();
 const PORT = 3000;
+const metricsDB = new MetricsDB();
 
 // Mac Mini OpenClaw paths
 const GATEWAY_PORT = 18789;
@@ -71,10 +73,40 @@ app.use(express.json());
 // API: Get session metrics
 app.get('/api/sessions', async (req, res) => {
   try {
-    const result = await callGateway('/api/sessions?messageLimit=5');
-    res.json(result);
+    // Use openclaw CLI to get session data
+    const { exec } = require('child_process');
+    const { promisify } = require('util');
+    const execAsync = promisify(exec);
+    
+    // Get session list with JSON output
+    const { stdout } = await execAsync('openclaw sessions --json');
+    const sessionsData = JSON.parse(stdout);
+    
+    // Transform to expected format
+    const sessions = (sessionsData.sessions || []).map(s => ({
+      sessionId: s.key,
+      model: s.model || 'unknown',
+      channel: s.kind || 'direct',
+      displayName: 'Rob Hoeller',
+      totalTokens: s.totalTokens || 0,
+      contextTokens: s.contextTokens || 200000,
+      messages: [{
+        usage: {
+          input: s.inputTokens || 0,
+          output: s.outputTokens || 0,
+          cost: {
+            input: (s.inputTokens || 0) * 0.000003,
+            output: (s.outputTokens || 0) * 0.000015,
+            total: ((s.inputTokens || 0) * 0.000003) + ((s.outputTokens || 0) * 0.000015)
+          }
+        }
+      }]
+    }));
+    
+    res.json({ sessions });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Session fetch error:', err);
+    res.status(500).json({ error: err.message, sessions: [] });
   }
 });
 
@@ -253,8 +285,88 @@ async function getFilesRecursive(dir, baseDir = dir) {
   return files;
 }
 
+// API: Get metrics by date range
+app.get('/api/metrics/range', async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+    
+    // Default to month-to-date if not provided
+    const end = endDate || new Date().toISOString().split('T')[0];
+    const start = startDate || new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().split('T')[0];
+    
+    const [byDate, byModel, daily] = await Promise.all([
+      metricsDB.getMetricsByDateRange(start, end),
+      metricsDB.getModelSummary(start, end),
+      metricsDB.getDailySummary(start, end)
+    ]);
+    
+    res.json({
+      startDate: start,
+      endDate: end,
+      byDate,
+      byModel,
+      daily
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// API: Log current metrics (called by collector)
+app.post('/api/metrics/log', async (req, res) => {
+  try {
+    await collectAndLogMetrics();
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Metrics collector function
+async function collectAndLogMetrics() {
+  try {
+    const { exec } = require('child_process');
+    const { promisify } = require('util');
+    const execAsync = promisify(exec);
+    
+    const { stdout } = await execAsync('openclaw sessions --json');
+    const sessionsData = JSON.parse(stdout);
+    
+    for (const s of sessionsData.sessions || []) {
+      // Calculate costs (Claude Sonnet 4.5 pricing)
+      const costInput = (s.inputTokens || 0) * 0.000003;
+      const costOutput = (s.outputTokens || 0) * 0.000015;
+      const costTotal = costInput + costOutput;
+      
+      await metricsDB.logMetrics({
+        sessionId: s.key,
+        model: s.model || 'unknown',
+        channel: s.kind || 'direct',
+        inputTokens: s.inputTokens || 0,
+        outputTokens: s.outputTokens || 0,
+        totalTokens: s.totalTokens || 0,
+        contextTokens: s.contextTokens || 200000,
+        costInput,
+        costOutput,
+        costTotal
+      });
+    }
+    
+    console.log(`✓ Metrics logged: ${sessionsData.sessions?.length || 0} sessions`);
+  } catch (err) {
+    console.error('Metrics collection error:', err);
+  }
+}
+
+// Start periodic metrics collection (every hour)
+setInterval(collectAndLogMetrics, 60 * 60 * 1000);
+
+// Collect initial metrics on startup
+collectAndLogMetrics();
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🕵️ Sherlock Dashboard running at http://localhost:${PORT}`);
   console.log(`   Workspace: ${WORKSPACE}`);
   console.log(`   Gateway: localhost:${GATEWAY_PORT}`);
+  console.log(`   Metrics: Collecting every hour`);
 });
