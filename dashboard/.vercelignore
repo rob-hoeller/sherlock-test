@@ -1,0 +1,4 @@
+# Vercel ignore patterns
+node_modules
+*.log
+.DS_Store
